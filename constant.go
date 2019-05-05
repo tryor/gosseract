@@ -57,6 +57,15 @@ const (
 	RIL_SYMBOL
 )
 
+type TessOcrEngineMode int
+
+const (
+	OEM_TESSERACT_ONLY = iota
+	OEM_CUBE_ONLY
+	OEM_TESSERACT_CUBE_COMBINED
+	OEM_DEFAULT
+)
+
 // SettableVariable represents available strings for TessBaseAPI::SetVariable.
 // See https://groups.google.com/forum/#!topic/tesseract-ocr/eHTBzrBiwvQ
 // and https://github.com/tesseract-ocr/tesseract/blob/master/ccmain/tesseractclass.h

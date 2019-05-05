@@ -2,15 +2,19 @@ package gosseract
 
 // #if __FreeBSD__ >= 10
 // #cgo LDFLAGS: -L/usr/local/lib -llept -ltesseract
+// #include "/usr/local/include/tesseract/capi.h"
+// #include "/usr/local/include/leptonica/allheaders.h"
 // #else
 // #cgo CXXFLAGS: -std=c++0x
 // #cgo LDFLAGS: -llept -ltesseract
 // #cgo CPPFLAGS: -Wno-unused-result
+// #include <tesseract/capi.h>
+// #include <leptonica/allheaders.h>
 // #endif
-// #include <stdlib.h>
-// #include <stdbool.h>
-// #include "tessbridge.h"
 import "C"
+
+// # include <stdlib.h>
+// # include <stdbool.h>
 import (
 	"fmt"
 	"image"
@@ -21,26 +25,34 @@ import (
 
 // Version returns the version of Tesseract-OCR
 func Version() string {
-	api := C.Create()
-	defer C.Free(api)
-	version := C.Version(api)
+	api := C.TessBaseAPICreate()
+	defer func() {
+		//C.Free(api)
+		C.TessBaseAPIEnd(api)
+		C.TessBaseAPIDelete(api)
+	}()
+	version := C.TessVersion()
 	return C.GoString(version)
 }
 
 // ClearPersistentCache clears any library-level memory caches. There are a variety of expensive-to-load constant data structures (mostly language dictionaries) that are cached globally – surviving the Init() and End() of individual TessBaseAPI's. This function allows the clearing of these caches.
 func ClearPersistentCache() {
-	api := C.Create()
-	defer C.Free(api)
-	C.ClearPersistentCache(api)
+	api := C.TessBaseAPICreate()
+	defer func() {
+		//C.Free(api)
+		C.TessBaseAPIEnd(api)
+		C.TessBaseAPIDelete(api)
+	}()
+	//C.TessBaseAPIClearPersistentCache(api) //@TODO ...
 }
 
 // Client is argument builder for tesseract::TessBaseAPI.
 type Client struct {
-	api C.TessBaseAPI
+	api *C.TessBaseAPI
 
 	// Holds a reference to the pix image to be able to destroy on client close
 	// or when a new image is set
-	pixImage C.PixImage
+	pixImage *C.PIX
 
 	// Trim specifies characters to trim, which would be trimed from result string.
 	// As results of OCR, text often contains unnecessary characters, such as newlines, on the head/foot of string.
@@ -72,9 +84,9 @@ type Client struct {
 // NewClient construct new Client. It's due to caller to Close this client.
 func NewClient() *Client {
 	client := &Client{
-		api:       C.Create(),
-		Variables: map[SettableVariable]string{},
-		Trim:      true,
+		api:        C.TessBaseAPICreate(),
+		Variables:  map[SettableVariable]string{},
+		Trim:       true,
 		shouldInit: true,
 	}
 	return client
@@ -82,15 +94,10 @@ func NewClient() *Client {
 
 // Close frees allocated API. This MUST be called for ANY client constructed by "NewClient" function.
 func (client *Client) Close() (err error) {
-	// defer func() {
-	// 	if e := recover(); e != nil {
-	// 		err = fmt.Errorf("%v", e)
-	// 	}
-	// }()
-	C.Clear(client.api)
-	C.Free(client.api)
+	C.TessBaseAPIClear(client.api)
+	C.TessBaseAPIDelete(client.api)
 	if client.pixImage != nil {
-		C.DestroyPixImage(client.pixImage)
+		C.pixDestroy(&client.pixImage)
 		client.pixImage = nil
 	}
 	return err
@@ -110,14 +117,14 @@ func (client *Client) SetImage(imagepath string) error {
 	}
 
 	if client.pixImage != nil {
-		C.DestroyPixImage(client.pixImage)
+		C.pixDestroy(&client.pixImage)
 		client.pixImage = nil
 	}
 
 	p := C.CString(imagepath)
 	defer C.free(unsafe.Pointer(p))
 
-	img := C.CreatePixImageByFilePath(p)
+	img := C.pixRead(p)
 	client.pixImage = img
 
 	return nil
@@ -134,11 +141,11 @@ func (client *Client) SetImageFromBytes(data []byte) error {
 	}
 
 	if client.pixImage != nil {
-		C.DestroyPixImage(client.pixImage)
+		C.pixDestroy(&client.pixImage)
 		client.pixImage = nil
 	}
 
-	img := C.CreatePixImageFromBytes((*C.uchar)(unsafe.Pointer(&data[0])), C.int(len(data)))
+	img := C.pixReadMem((*C.uchar)(unsafe.Pointer(&data[0])), C.uint(len(data)))
 	client.pixImage = img
 
 	return nil
@@ -169,7 +176,7 @@ func (client *Client) DisableOutput() error {
 // See official documentation for whitelist here https://github.com/tesseract-ocr/tesseract/wiki/ImproveQuality#dictionaries-word-lists-and-patterns
 func (client *Client) SetWhitelist(whitelist string) error {
 	err := client.SetVariable(TESSEDIT_CHAR_WHITELIST, whitelist)
-	
+
 	client.setVariablesToInitializedAPIIfNeeded()
 
 	return err
@@ -179,7 +186,7 @@ func (client *Client) SetWhitelist(whitelist string) error {
 // See official documentation for whitelist here https://github.com/tesseract-ocr/tesseract/wiki/ImproveQuality#dictionaries-word-lists-and-patterns
 func (client *Client) SetBlacklist(whitelist string) error {
 	err := client.SetVariable(TESSEDIT_CHAR_BLACKLIST, whitelist)
-	
+
 	client.setVariablesToInitializedAPIIfNeeded()
 
 	return err
@@ -201,7 +208,7 @@ func (client *Client) SetVariable(key SettableVariable, value string) error {
 // See official documentation for PSM here https://github.com/tesseract-ocr/tesseract/wiki/ImproveQuality#page-segmentation-method
 // See https://github.com/otiai10/gosseract/issues/52 for more information.
 func (client *Client) SetPageSegMode(mode PageSegMode) error {
-	C.SetPageSegMode(client.api, C.int(mode))
+	C.TessBaseAPISetPageSegMode(client.api, C.TessPageSegMode(mode))
 	return nil
 }
 
@@ -221,12 +228,64 @@ func (client *Client) SetConfigFile(fpath string) error {
 	return nil
 }
 
+// Call setVariablesToInitializedAPI only if the API is initialized
+// it is useful to call when changing variables that does not requires
+// to init a new tesseract instance. Otherwise it is better to just flag
+// the instance for re-init (Client.flagForInit())
+func (client *Client) setVariablesToInitializedAPIIfNeeded() error {
+	if client.shouldInit == false {
+		return client.setVariablesToInitializedAPI()
+	}
+
+	return nil
+}
+
+// This method sets all the sspecified variables to TessBaseAPI structure.
+// Because `api->SetVariable` must be called after `api->Init()`,
+// gosseract.Client.SetVariable cannot call `api->SetVariable` directly.
+// See https://zdenop.github.io/tesseract-doc/classtesseract_1_1_tess_base_a_p_i.html#a2e09259c558c6d8e0f7e523cbaf5adf5
+func (client *Client) setVariablesToInitializedAPI() error {
+	for key, value := range client.Variables {
+		k, v := C.CString(string(key)), C.CString(value)
+		defer C.free(unsafe.Pointer(k))
+		defer C.free(unsafe.Pointer(v))
+		res := C.TessBaseAPISetVariable(client.api, k, v)
+		//if bool(res) == false {
+		if res == 0 {
+			return fmt.Errorf("failed to set variable with key(%v) and value(%v)", key, value)
+		}
+	}
+	return nil
+}
+
+// Text finally initialize tesseract::TessBaseAPI, execute OCR and extract text detected as string.
+func (client *Client) Text() (out string, err error) {
+	if err = client.init(); err != nil {
+		return
+	}
+	out = C.GoString(C.TessBaseAPIGetUTF8Text(client.api))
+	if client.Trim {
+		out = strings.Trim(out, "\n")
+	}
+	return out, err
+}
+
+// HOCRText finally initialize tesseract::TessBaseAPI, execute OCR and returns hOCR text.
+// See https://en.wikipedia.org/wiki/HOCR for more information of hOCR.
+func (client *Client) HOCRText() (out string, err error) {
+	if err = client.init(); err != nil {
+		return
+	}
+	out = C.GoString(C.TessBaseAPIGetHOCRText(client.api, 0))
+	return
+}
+
 // Initialize tesseract::TessBaseAPI
 // TODO: add tessdata prefix
 func (client *Client) init() error {
 
 	if client.shouldInit == false {
-		C.SetPixImage(client.api, client.pixImage)
+		C.TessBaseAPISetImage2(client.api, client.pixImage)
 		return nil
 	}
 
@@ -243,7 +302,7 @@ func (client *Client) init() error {
 	defer C.free(unsafe.Pointer(configfile))
 
 	errbuf := [512]C.char{}
-	res := C.Init(client.api, nil, languages, configfile, &errbuf[0])
+	res := client.tessBaseAPIInit(client.api, nil, languages, configfile, &errbuf[0])
 	msg := C.GoString(&errbuf[0])
 
 	if res != 0 {
@@ -258,69 +317,59 @@ func (client *Client) init() error {
 		return fmt.Errorf("PixImage is not set, use SetImage or SetImageFromBytes before Text or HOCRText")
 	}
 
-	C.SetPixImage(client.api, client.pixImage)
+	C.TessBaseAPISetImage2(client.api, client.pixImage)
 
 	client.shouldInit = false
 
 	return nil
 }
 
+func (client *Client) tessBaseAPIInit(api *C.TessBaseAPI, tessdataprefix *C.char, languages *C.char, configfilepath *C.char, errbuf *C.char) C.int {
+	var ret C.int
+	if configfilepath != nil {
+		configs_size := 1
+		ret = C.TessBaseAPIInit1(api, tessdataprefix, languages, OEM_DEFAULT, (**C.char)(unsafe.Pointer(&configfilepath)), C.int(configs_size))
+	} else {
+		ret = C.TessBaseAPIInit3(api, tessdataprefix, languages)
+	}
+
+	return ret
+}
+
+//int Init(TessBaseAPI a, char* tessdataprefix, char* languages, char* configfilepath, char* errbuf) {
+//  tesseract::TessBaseAPI * api = (tesseract::TessBaseAPI*)a;
+
+//  // {{{ Redirect STDERR to given buffer
+//  fflush(stderr);
+//  int original_stderr;
+//  original_stderr = dup(STDERR_FILENO);
+//  (void) freopen("/dev/null", "a", stderr);
+//  setbuf(stderr, errbuf);
+//  // }}}
+
+//  int ret;
+//  if (configfilepath != NULL) {
+//    char *configs[]={configfilepath};
+//    int configs_size = 1;
+//    ret = api->Init(tessdataprefix, languages, tesseract::OEM_DEFAULT, configs, configs_size, NULL, NULL, false);
+//  } else {
+//    ret = api->Init(tessdataprefix, languages);
+//  }
+
+//  // {{{ Restore default stderr
+//  (void) freopen("/dev/null", "a", stderr);
+//  dup2(original_stderr, STDERR_FILENO);
+//  setbuf(stderr, NULL);
+//  // }}}
+
+//  return ret;
+//}
+
 // This method flag the current instance to be initialized again on the next call to a function that
 // requires a gosseract API initialized: when user change the config file or the languages
 // the instance needs to init a new gosseract api
 func (client *Client) flagForInit() {
 	client.shouldInit = true
-}
-
-// This method sets all the sspecified variables to TessBaseAPI structure.
-// Because `api->SetVariable` must be called after `api->Init()`,
-// gosseract.Client.SetVariable cannot call `api->SetVariable` directly.
-// See https://zdenop.github.io/tesseract-doc/classtesseract_1_1_tess_base_a_p_i.html#a2e09259c558c6d8e0f7e523cbaf5adf5
-func (client *Client) setVariablesToInitializedAPI() error {
-	for key, value := range client.Variables {
-		k, v := C.CString(string(key)), C.CString(value)
-		defer C.free(unsafe.Pointer(k))
-		defer C.free(unsafe.Pointer(v))
-		res := C.SetVariable(client.api, k, v)
-		if bool(res) == false {
-			return fmt.Errorf("failed to set variable with key(%v) and value(%v)", key, value)
-		}
-	}
-	return nil
-}
-
-// Call setVariablesToInitializedAPI only if the API is initialized
-// it is useful to call when changing variables that does not requires
-// to init a new tesseract instance. Otherwise it is better to just flag
-// the instance for re-init (Client.flagForInit())
-func (client *Client) setVariablesToInitializedAPIIfNeeded() error {
-	if client.shouldInit == false {
-		return client.setVariablesToInitializedAPI()
-	}
-
-	return nil
-}
-
-// Text finally initialize tesseract::TessBaseAPI, execute OCR and extract text detected as string.
-func (client *Client) Text() (out string, err error) {
-	if err = client.init(); err != nil {
-		return
-	}
-	out = C.GoString(C.UTF8Text(client.api))
-	if client.Trim {
-		out = strings.Trim(out, "\n")
-	}
-	return out, err
-}
-
-// HOCRText finally initialize tesseract::TessBaseAPI, execute OCR and returns hOCR text.
-// See https://en.wikipedia.org/wiki/HOCR for more information of hOCR.
-func (client *Client) HOCRText() (out string, err error) {
-	if err = client.init(); err != nil {
-		return
-	}
-	out = C.GoString(C.HOCRText(client.api))
-	return
 }
 
 // BoundingBox contains the position, confidence and UTF8 text of the recognized word
@@ -338,20 +387,34 @@ func (client *Client) GetBoundingBoxes(level PageIteratorLevel) (out []BoundingB
 	if err = client.init(); err != nil {
 		return
 	}
-	boxArray := C.GetBoundingBoxes(client.api, C.int(level))
-	length := int(boxArray.length)
-	defer C.free(unsafe.Pointer(boxArray.boxes))
-	defer C.free(unsafe.Pointer(boxArray))
-
-	for i := 0; i < length; i++ {
-		// cast to bounding_box: boxes + i*sizeof(box)
-		box := (*C.struct_bounding_box)(unsafe.Pointer(uintptr(unsafe.Pointer(boxArray.boxes)) + uintptr(i)*unsafe.Sizeof(C.struct_bounding_box{})))
-		out = append(out, BoundingBox{
-			Box:        image.Rect(int(box.x1), int(box.y1), int(box.x2), int(box.y2)),
-			Word:       C.GoString(box.word),
-			Confidence: float64(box.confidence),
-		})
-	}
-
+	out = getBoundingBoxes(client.api, int(level))
 	return
+}
+
+func getBoundingBoxes(api *C.TessBaseAPI, pageIteratorLevel int) []BoundingBox {
+	var etext_desc *C.struct_ETEXT_DESC
+	C.TessBaseAPIRecognize(api, etext_desc)
+	ri := C.TessBaseAPIGetIterator(api)
+	pi := C.TessResultIteratorGetPageIterator(ri)
+	level := C.TessPageIteratorLevel(pageIteratorLevel)
+	boxes := make([]BoundingBox, 0, 100)
+	if ri != nil {
+		var left, top, right, bottom int
+		for {
+			box := BoundingBox{}
+			bb_rs := C.TessPageIteratorBoundingBox(pi, level, (*C.int)(unsafe.Pointer(&left)), (*C.int)(unsafe.Pointer(&top)), (*C.int)(unsafe.Pointer(&right)), (*C.int)(unsafe.Pointer(&bottom)))
+			box.Word = C.GoString(C.TessResultIteratorGetUTF8Text(ri, level))
+			box.Confidence = float64(C.TessResultIteratorConfidence(ri, level))
+			if bb_rs == 0 {
+				break
+			}
+			box.Box = image.Rect(left, top, right, bottom)
+			boxes = append(boxes, box)
+			rs := C.TessPageIteratorNext(pi, level)
+			if 0 == rs {
+				break
+			}
+		}
+	}
+	return boxes
 }
